@@ -22,7 +22,7 @@ Automated VK Cloud virtual machine creator that searches for VMs with IP address
 
 1. Clone the repository:
 ```bash
-git clone <your-repo-url>
+git clone git@github.com:AndreyTimoschuk/vk-ip-hunter.git
 cd vk_parser
 ```
 

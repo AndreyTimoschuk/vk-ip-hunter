@@ -67,10 +67,12 @@ IP_RANGES = [
     # (ipaddress.IPv4Address("94.139.244.0"), ipaddress.IPv4Address("94.139.247.255")),  # 94.139.244.0/22 - fix-price.ru, bitrix24.com
     # (ipaddress.IPv4Address("95.163.248.0"), ipaddress.IPv4Address("95.163.251.255")),  # 95.163.248.0/22 - bitrix24.com, education services
     
-    # Original ranges (keep for compatibility)
+    # ext-sub35 networks
     (ipaddress.IPv4Address("95.163.248.10"), ipaddress.IPv4Address("95.163.251.250")),
-    (ipaddress.IPv4Address("217.16.24.1"), ipaddress.IPv4Address("217.16.24.2")),
-    (ipaddress.IPv4Address("217.16.24.3"), ipaddress.IPv4Address("217.16.27.253")),
+    
+    # ext-sub9 networks
+    (ipaddress.IPv4Address("90.156.150.0"), ipaddress.IPv4Address("90.156.151.255")),  # 90.156.150.0/23 - ext-sub9
+    (ipaddress.IPv4Address("217.16.24.0"), ipaddress.IPv4Address("217.16.27.255")),     # 217.16.24.0/22 - ext-sub9
 ]
 
 # VM Configuration - adjust these parameters according to your needs

@@ -21,6 +21,7 @@ import threading
 import os
 import random
 import string
+from datetime import datetime
 
 # Load .env file if it exists
 try:
@@ -437,8 +438,9 @@ class VKCloudClient:
                 logger.error(f"Server {server_id} entered ERROR state")
                 return False
             
-            # Use shutdown_event.wait instead of time.sleep for faster response to Ctrl+C
-            if shutdown_event.wait(5):
+            # Human-like waiting: variable check intervals
+            check_interval = random.randint(3, 8)  # Sometimes check more/less frequently
+            if shutdown_event.wait(check_interval):
                 return False
         
         logger.error(f"Server {server_id} did not become ACTIVE within timeout")
@@ -529,6 +531,81 @@ def generate_random_vm_name() -> str:
     return pattern()
 
 
+def human_like_delay(min_seconds: int, max_seconds: int, distribution: str = "normal") -> int:
+    """
+    Generate human-like delay with natural distribution
+    distribution: "normal" (most common), "exponential" (longer tails), "uniform"
+    """
+    if distribution == "normal":
+        # Normal distribution - most delays around the middle, some outliers
+        mean = (min_seconds + max_seconds) / 2
+        std = (max_seconds - min_seconds) / 4
+        delay = int(random.gauss(mean, std))
+    elif distribution == "exponential":
+        # Exponential - more short delays, occasional very long ones
+        delay = int(random.expovariate(1.0 / ((min_seconds + max_seconds) / 2)))
+    else:
+        # Uniform distribution
+        delay = random.randint(min_seconds, max_seconds)
+    
+    # Clamp to bounds
+    return max(min_seconds, min(max_seconds, delay))
+
+
+def random_break_chance(attempt: int) -> bool:
+    """
+    Simulate human behavior: sometimes take a break
+    Higher chance after multiple attempts
+    """
+    # 5% base chance, increases with attempts
+    break_chance = 0.05 + (attempt * 0.01)
+    return random.random() < min(break_chance, 0.25)  # Max 25% chance
+
+
+def get_time_based_delay_multiplier() -> float:
+    """
+    Simulate human activity patterns based on time of day
+    More activity during work hours, less at night
+    """
+    hour = datetime.now().hour
+    
+    # Work hours (9-18) - normal activity
+    if 9 <= hour <= 18:
+        return random.uniform(0.8, 1.2)
+    # Evening (18-22) - moderate activity
+    elif 18 < hour <= 22:
+        return random.uniform(1.0, 1.5)
+    # Night (22-6) - low activity
+    elif hour >= 22 or hour < 6:
+        return random.uniform(1.5, 3.0)
+    # Early morning (6-9) - increasing activity
+    else:
+        return random.uniform(1.2, 1.8)
+
+
+def human_like_wait(seconds: int, check_interval: int = 5):
+    """
+    Wait with human-like behavior: occasional micro-pauses
+    """
+    elapsed = 0
+    while elapsed < seconds:
+        if shutdown_event.is_set():
+            return True
+        
+        # Sometimes pause briefly (like human checking something)
+        if random.random() < 0.1:  # 10% chance
+            micro_pause = random.uniform(0.5, 2.0)
+            time.sleep(micro_pause)
+            elapsed += micro_pause
+        
+        wait_time = min(check_interval, seconds - elapsed)
+        if shutdown_event.wait(wait_time):
+            return True
+        elapsed += wait_time
+    
+    return False
+
+
 def is_ip_in_range(ip_str: str) -> bool:
     """Check if IP is in any of the target ranges"""
     try:
@@ -555,24 +632,58 @@ def process_vm_creation(client: VKCloudClient, worker_id: int) -> Optional[Dict[
             return None
         
         attempt += 1
+        
+        # Simulate human behavior: occasional breaks
+        if random_break_chance(attempt):
+            break_duration = human_like_delay(60, 300, "exponential")  # 1-5 minutes
+            logger.info(f"[Worker {worker_id}] Taking a break for {break_duration} seconds...")
+            if human_like_wait(break_duration):
+                return None
+        
+        # Longer break after many attempts (like human getting tired)
+        if attempt > 0 and attempt % 20 == 0:
+            long_break = human_like_delay(180, 600, "exponential")  # 3-10 minutes
+            logger.info(f"[Worker {worker_id}] Long break after {attempt} attempts: {long_break} seconds...")
+            if human_like_wait(long_break):
+                return None
+        
         # Generate random VM name
         vm_name = generate_random_vm_name()
         
         logger.info(f"[Worker {worker_id}] Creating VM: {vm_name} (attempt {attempt})")
         
-        # Random delay before creating VM (30-60 seconds)
-        delay = random.randint(30, 60)
+        # Human-like delay with time-based adjustment
+        base_delay = human_like_delay(45, 120, "normal")  # 45-120 seconds base
+        time_multiplier = get_time_based_delay_multiplier()
+        delay = int(base_delay * time_multiplier)
+        
+        # Sometimes "think" before creating (like human double-checking)
+        if random.random() < 0.3:  # 30% chance
+            thinking_time = random.uniform(5, 15)
+            logger.info(f"[Worker {worker_id}] Thinking for {thinking_time:.1f} seconds...")
+            if shutdown_event.wait(thinking_time):
+                return None
+        
         logger.info(f"[Worker {worker_id}] Waiting {delay} seconds before creating VM...")
-        if shutdown_event.wait(delay):
+        if human_like_wait(delay):
             return None
+        
+        # Sometimes "change mind" before creating (5% chance)
+        if random.random() < 0.05:
+            logger.info(f"[Worker {worker_id}] Changed mind, skipping this VM...")
+            skip_delay = human_like_delay(20, 60, "normal")
+            if human_like_wait(skip_delay):
+                return None
+            continue
         
         # Create server
         result = client.create_server(vm_name, VM_CONFIG)
         if not result:
             logger.error(f"[Worker {worker_id}] Failed to create VM, retrying...")
-            # Wait 10-20 seconds before retry
-            retry_delay = random.randint(10, 20)
-            if shutdown_event.wait(retry_delay):
+            # Human-like retry delay: longer when frustrated
+            retry_delay = human_like_delay(15, 45, "exponential")
+            logger.info(f"[Worker {worker_id}] Waiting {retry_delay} seconds before retry...")
+            if human_like_wait(retry_delay):
                 return None
             continue
         
@@ -587,12 +698,17 @@ def process_vm_creation(client: VKCloudClient, worker_id: int) -> Optional[Dict[
         
         logger.info(f"[Worker {worker_id}] VM created with ID: {server_id}, waiting for ACTIVE status...")
         
-        # Wait for server to become active
+        # Wait for server to become active (with human-like patience)
+        # Sometimes check status more frequently, sometimes less
         if not client.wait_for_server_active(server_id):
             logger.warning(f"[Worker {worker_id}] VM {server_id} failed to become ACTIVE, deleting...")
             if client.delete_server(server_id):
                 if server_id in created_vms:
                     created_vms.remove(server_id)
+            # Human reaction: wait a bit after failure
+            failure_delay = human_like_delay(10, 30, "normal")
+            if human_like_wait(failure_delay):
+                return None
             continue
         
         # Get IPs
@@ -633,10 +749,24 @@ def process_vm_creation(client: VKCloudClient, worker_id: int) -> Optional[Dict[
             if client.delete_server(server_id):
                 if server_id in created_vms:
                     created_vms.remove(server_id)
-            logger.info(f"[Worker {worker_id}] VM deleted, waiting before creating new one...")
-            # Wait 15-30 seconds after deletion before creating next VM
-            post_delete_delay = random.randint(15, 30)
-            if shutdown_event.wait(post_delete_delay):
+            
+            # Human-like behavior: sometimes take longer to decide next action
+            logger.info(f"[Worker {worker_id}] VM deleted, considering next step...")
+            
+            # Sometimes "review" what happened (10% chance)
+            if random.random() < 0.1:
+                review_time = human_like_delay(10, 30, "normal")
+                logger.info(f"[Worker {worker_id}] Reviewing results for {review_time} seconds...")
+                if human_like_wait(review_time):
+                    return None
+            
+            # Wait after deletion with human-like delay
+            post_delete_delay = human_like_delay(20, 90, "normal")
+            time_multiplier = get_time_based_delay_multiplier()
+            post_delete_delay = int(post_delete_delay * time_multiplier)
+            
+            logger.info(f"[Worker {worker_id}] Waiting {post_delete_delay} seconds before creating new VM...")
+            if human_like_wait(post_delete_delay):
                 return None
 
 

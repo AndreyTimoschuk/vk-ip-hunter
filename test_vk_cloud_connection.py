@@ -7,6 +7,21 @@ import requests
 import json
 import os
 import sys
+from pathlib import Path
+
+# Load .env file if it exists
+try:
+    from dotenv import load_dotenv
+    env_path = Path(__file__).parent / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
+        print(f"Loaded environment variables from {env_path}")
+    else:
+        print(f"Warning: .env file not found at {env_path}")
+        print("Copy env.example to .env and configure it first")
+except ImportError:
+    print("Warning: python-dotenv not installed. Install it with: pip install python-dotenv")
+    print("Or use run.sh script to load .env file")
 
 # Configuration
 AUTH_TOKEN = os.getenv("VK_CLOUD_AUTH_TOKEN", "")

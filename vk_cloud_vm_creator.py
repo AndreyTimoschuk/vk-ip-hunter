@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 VK Cloud VM Creator with IP Range Filter
-Creates VMs and checks if their IP is in the range 95.163.248.10 - 95.163.251.250
+Creates VMs and checks if their IP is in VK Cloud ranges with REAL services
+Based on comprehensive scan results showing 459 real services (excluding Mail.ru infrastructure)
+Includes government, banking, retail, technology, and business services
 """
 
 import requests
@@ -17,49 +19,96 @@ from collections import Counter
 from pathlib import Path
 import threading
 import os
+import random
+import string
 
-# Configuration from environment variables
+# Load .env file if it exists
+try:
+    from dotenv import load_dotenv
+    env_path = Path(__file__).parent / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
+except ImportError:
+    pass  # python-dotenv not installed, continue without it
+
+# Configuration
 AUTH_TOKEN = os.getenv("VK_CLOUD_AUTH_TOKEN", "")
 NOVA_ENDPOINT = os.getenv("VK_CLOUD_NOVA_ENDPOINT", "https://infra.mail.ru:8774/v2.1")
 PROJECT_ID = os.getenv("VK_CLOUD_PROJECT_ID", "")
 
-# Telegram Bot Configuration (optional)
+# Telegram Bot Configuration
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")  # Set your Chat ID here (send /start to bot and get ID from @userinfobot)
 
-# IP Ranges - multiple subnets to search
+# IP Ranges - VK Cloud ranges with REAL services (excluding Mail.ru infrastructure)
 IP_RANGES = [
+    # Top priority ranges with government and banking services
+    
+    # (ipaddress.IPv4Address("109.120.188.0"), ipaddress.IPv4Address("109.120.191.255")),  # 109.120.188.0/22 - mailer.digital.gov.ru
+    
+    # High priority ranges with banking and retail services
+    # (ipaddress.IPv4Address("5.188.140.0"), ipaddress.IPv4Address("5.188.143.255")),      # 5.188.140.0/22 - greenmoney.ru, gigasport.ru
+    # (ipaddress.IPv4Address("213.219.212.0"), ipaddress.IPv4Address("213.219.215.255")),  # 213.219.212.0/22 - bank-hlynov.ru, fix-price.ru
+    # (ipaddress.IPv4Address("185.241.192.0"), ipaddress.IPv4Address("185.241.195.255")),  # 185.241.192.0/22 - magnit.ru, bitrix24.com
+    # (ipaddress.IPv4Address("87.239.104.0"), ipaddress.IPv4Address("87.239.111.255")),   # 87.239.104.0/21 - greenmoney.ru, finenumbers.com
+    
+    # Technology and business services ranges
+    # (ipaddress.IPv4Address("89.208.196.0"), ipaddress.IPv4Address("89.208.199.255")),    # 89.208.196.0/22 - bitrix24.com, finenumbers.com
+    # (ipaddress.IPv4Address("95.163.212.0"), ipaddress.IPv4Address("95.163.215.255")),    # 95.163.212.0/22 - tarantool.org, bitrix24.com
+    # (ipaddress.IPv4Address("109.120.180.0"), ipaddress.IPv4Address("109.120.183.255")),  # 109.120.180.0/22 - bitrix24.com, delo-group.com
+    # (ipaddress.IPv4Address("89.208.208.0"), ipaddress.IPv4Address("89.208.211.255")),   # 89.208.208.0/22 - bank-hlynov.ru, olimpoks.ru
+    
+    # Additional ranges with real services
+    # (ipaddress.IPv4Address("85.192.32.0"), ipaddress.IPv4Address("85.192.35.255")),      # 85.192.32.0/22 - bitrix24.com, education services
+    # (ipaddress.IPv4Address("37.139.40.0"), ipaddress.IPv4Address("37.139.43.255")),     # 37.139.40.0/22 - comfortbooking.ru, business services
+    # (ipaddress.IPv4Address("89.208.84.0"), ipaddress.IPv4Address("89.208.87.255")),     # 89.208.84.0/22 - bitrix24.com, business services
+    # (ipaddress.IPv4Address("217.16.16.0"), ipaddress.IPv4Address("217.16.23.255")),      # 217.16.16.0/21 - r7.ru, delo-group.com
+    # (ipaddress.IPv4Address("94.139.244.0"), ipaddress.IPv4Address("94.139.247.255")),  # 94.139.244.0/22 - fix-price.ru, bitrix24.com
+    # (ipaddress.IPv4Address("95.163.248.0"), ipaddress.IPv4Address("95.163.251.255")),  # 95.163.248.0/22 - bitrix24.com, education services
+    
+    # Original ranges (keep for compatibility)
     (ipaddress.IPv4Address("95.163.248.10"), ipaddress.IPv4Address("95.163.251.250")),
     (ipaddress.IPv4Address("217.16.24.1"), ipaddress.IPv4Address("217.16.24.2")),
     (ipaddress.IPv4Address("217.16.24.3"), ipaddress.IPv4Address("217.16.27.253")),
 ]
 
-# VM Configuration
+# VM Configuration - adjust these parameters according to your needs
 VM_CONFIG = {
     "name": "auto-vm",
-    "flavorRef": os.getenv("VM_FLAVOR_ID", ""),
+    "flavorRef": "9cdbca68-5e15-4c54-979d-9952785ba33e",  # STD2-1-1: 1GB RAM, 1 CPU, 0GB disk
     "imageRef": "",  # Not used with block_device_mapping_v2
-    "adminPass": os.getenv("VM_ADMIN_PASSWORD", "ChangeMe123!"),
-    "networks": [{"uuid": os.getenv("VM_NETWORK_ID", "")}],
+    "adminPass": "12345678a",
+    "config_drive": True,  # Enable config drive for network setup
+    "OS-DCF:diskConfig": "AUTO",  # Automatic disk configuration
+    "security_groups": [
+        {
+            "name": "default"
+        }
+    ],
     "metadata": {
         "backup_policy": "disabled"  # Disable auto backup
     },
+    "networks": [
+        {
+            "uuid": "ec8c610e-6387-447e-83d2-d2c541e88164"  # internet (external network)
+        }
+    ],
     "block_device_mapping_v2": [
         {
             "device_name": "/dev/vda",
             "source_type": "image",
             "destination_type": "volume",
-            "uuid": os.getenv("VM_IMAGE_ID", ""),
-            "boot_index": "0",
-            "volume_size": 10,  # 10GB disk
-            "delete_on_termination": True
+            "uuid": "769e4c02-680c-420e-874b-6fd41f2da6be",  # ubuntu-22-202508151311.gitfaa03fa8
+            "boot_index": 0,
+            "delete_on_termination": True,
+            "volume_size": 10  # 10GB disk
         }
     ]
 }
 
 
 # Parallel workers
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", "14"))
+MAX_WORKERS = 13
 
 # Global variables for cleanup
 created_vms = []
@@ -412,6 +461,33 @@ class VKCloudClient:
         
         return ips
     
+    def configure_server_network(self, server_id: str) -> bool:
+        """Configure server network interface after creation"""
+        try:
+            # Get server details
+            details = self.get_server_details(server_id)
+            if not details:
+                return False
+            
+            # Check if server has IP addresses
+            addresses = details.get("server", {}).get("addresses", {})
+            if not addresses:
+                logger.warning(f"Server {server_id} has no IP addresses")
+                return False
+            
+            # Log network configuration
+            for network_name, network_ips in addresses.items():
+                for ip_info in network_ips:
+                    ip = ip_info.get("addr")
+                    if ip:
+                        logger.info(f"Server {server_id} configured with IP: {ip} on network: {network_name}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to configure network for server {server_id}: {e}")
+            return False
+    
     def list_flavors(self) -> Optional[Dict[str, Any]]:
         """List available flavors"""
         url = f"{self.endpoint}/flavors/detail"
@@ -426,6 +502,33 @@ class VKCloudClient:
             return None
 
 
+def generate_random_vm_name() -> str:
+    """Generate random VM name with random pattern"""
+    pattern = random.choice([
+        # Pattern 1: word-word-chars
+        lambda: f"{''.join(random.choices(string.ascii_lowercase, k=random.randint(4, 7)))}-{''.join(random.choices(string.ascii_lowercase, k=random.randint(4, 6)))}-{''.join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(4, 8)))}",
+        # Pattern 2: word-word-word
+        lambda: f"{''.join(random.choices(string.ascii_lowercase, k=random.randint(3, 5)))}-{''.join(random.choices(string.ascii_lowercase, k=random.randint(3, 5)))}-{''.join(random.choices(string.ascii_lowercase, k=random.randint(3, 5)))}",
+        # Pattern 3: word-chars
+        lambda: f"{''.join(random.choices(string.ascii_lowercase, k=random.randint(5, 8)))}-{''.join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(6, 10)))}",
+        # Pattern 4: chars-word
+        lambda: f"{''.join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(5, 8)))}-{''.join(random.choices(string.ascii_lowercase, k=random.randint(4, 7)))}",
+        # Pattern 5: word-word
+        lambda: f"{''.join(random.choices(string.ascii_lowercase, k=random.randint(4, 7)))}-{''.join(random.choices(string.ascii_lowercase, k=random.randint(4, 7)))}",
+        # Pattern 6: word-digits
+        lambda: f"{''.join(random.choices(string.ascii_lowercase, k=random.randint(4, 7)))}-{''.join(random.choices(string.digits, k=random.randint(4, 8)))}",
+        # Pattern 7: digits-word
+        lambda: f"{''.join(random.choices(string.digits, k=random.randint(3, 6)))}-{''.join(random.choices(string.ascii_lowercase, k=random.randint(4, 7)))}",
+        # Pattern 8: single long word
+        lambda: ''.join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(8, 15))),
+        # Pattern 9: word-word-word-chars
+        lambda: f"{''.join(random.choices(string.ascii_lowercase, k=random.randint(3, 4)))}-{''.join(random.choices(string.ascii_lowercase, k=random.randint(3, 4)))}-{''.join(random.choices(string.ascii_lowercase, k=random.randint(3, 4)))}-{''.join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(4, 6)))}",
+        # Pattern 10: mixed alphanumeric without separators
+        lambda: ''.join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(10, 18))),
+    ])
+    return pattern()
+
+
 def is_ip_in_range(ip_str: str) -> bool:
     """Check if IP is in any of the target ranges"""
     try:
@@ -438,7 +541,7 @@ def is_ip_in_range(ip_str: str) -> bool:
         return False
 
 
-def process_vm_creation(client: VKCloudClient, worker_id: int, vm_name_prefix: str) -> Optional[Dict[str, Any]]:
+def process_vm_creation(client: VKCloudClient, worker_id: int) -> Optional[Dict[str, Any]]:
     """
     Create VMs until one with correct IP is found
     Returns VM info if successful, None otherwise
@@ -452,15 +555,24 @@ def process_vm_creation(client: VKCloudClient, worker_id: int, vm_name_prefix: s
             return None
         
         attempt += 1
-        vm_name = f"{vm_name_prefix}-worker{worker_id}-attempt{attempt}"
+        # Generate random VM name
+        vm_name = generate_random_vm_name()
         
-        logger.info(f"[Worker {worker_id}] Creating VM: {vm_name}")
+        logger.info(f"[Worker {worker_id}] Creating VM: {vm_name} (attempt {attempt})")
+        
+        # Random delay before creating VM (30-60 seconds)
+        delay = random.randint(30, 60)
+        logger.info(f"[Worker {worker_id}] Waiting {delay} seconds before creating VM...")
+        if shutdown_event.wait(delay):
+            return None
         
         # Create server
         result = client.create_server(vm_name, VM_CONFIG)
         if not result:
             logger.error(f"[Worker {worker_id}] Failed to create VM, retrying...")
-            if shutdown_event.wait(5):  # Wait 5 sec or until shutdown
+            # Wait 10-20 seconds before retry
+            retry_delay = random.randint(10, 20)
+            if shutdown_event.wait(retry_delay):
                 return None
             continue
         
@@ -486,6 +598,10 @@ def process_vm_creation(client: VKCloudClient, worker_id: int, vm_name_prefix: s
         # Get IPs
         ips = client.get_server_ips(server_id)
         logger.info(f"[Worker {worker_id}] VM {server_id} is ACTIVE with IPs: {ips}")
+        
+        # Configure network interface
+        if not client.configure_server_network(server_id):
+            logger.warning(f"[Worker {worker_id}] Failed to configure network for VM {server_id}")
         
         # Update statistics
         if ips:
@@ -517,7 +633,11 @@ def process_vm_creation(client: VKCloudClient, worker_id: int, vm_name_prefix: s
             if client.delete_server(server_id):
                 if server_id in created_vms:
                     created_vms.remove(server_id)
-            logger.info(f"[Worker {worker_id}] VM deleted, creating new one...")
+            logger.info(f"[Worker {worker_id}] VM deleted, waiting before creating new one...")
+            # Wait 15-30 seconds after deletion before creating next VM
+            post_delete_delay = random.randint(15, 30)
+            if shutdown_event.wait(post_delete_delay):
+                return None
 
 
 def main():
@@ -550,13 +670,6 @@ def main():
         bot_thread.start()
         logger.info("Telegram bot listener started")
     
-    # Check required environment variables
-    if not AUTH_TOKEN:
-        logger.error("VK_CLOUD_AUTH_TOKEN environment variable is not set!")
-        logger.error("Please set it: export VK_CLOUD_AUTH_TOKEN='your_token'")
-        send_telegram_message("❌ <b>ERROR</b>\n\nVK_CLOUD_AUTH_TOKEN not set!")
-        sys.exit(1)
-    
     client = VKCloudClient(AUTH_TOKEN, NOVA_ENDPOINT)
     
     # Check configuration
@@ -584,12 +697,10 @@ def main():
     # Start parallel processing
     logger.info(f"Starting {MAX_WORKERS} workers...")
     
-    vm_name_prefix = f"vm-hunt-{int(time.time())}"
-    
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as exec:
         executor = exec
         futures = {
-            executor.submit(process_vm_creation, client, i, vm_name_prefix): i 
+            executor.submit(process_vm_creation, client, i): i 
             for i in range(1, MAX_WORKERS + 1)
         }
         

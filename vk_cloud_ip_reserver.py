@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-VK Cloud VM Creator with IP Range Filter
-Creates VMs and checks if their IP is in VK Cloud ranges with REAL services
+VK Cloud Floating IP Reserver with IP Range Filter
+Reserves floating IPs and checks if they are in VK Cloud ranges with REAL services
 Based on comprehensive scan results showing 459 real services (excluding Mail.ru infrastructure)
 Includes government, banking, retail, technology, and business services
 """
@@ -15,12 +15,10 @@ from typing import Optional, Dict, Any
 import ipaddress
 import signal
 import sys
-from collections import Counter
 from pathlib import Path
 import threading
 import os
 import random
-import string
 from datetime import datetime
 
 # Load .env file if it exists
@@ -34,12 +32,13 @@ except ImportError:
 
 # Configuration
 AUTH_TOKEN = os.getenv("VK_CLOUD_AUTH_TOKEN", "")
-NOVA_ENDPOINT = os.getenv("VK_CLOUD_NOVA_ENDPOINT", "https://infra.mail.ru:8774/v2.1")
+NEUTRON_ENDPOINT = os.getenv("VK_CLOUD_NEUTRON_ENDPOINT", "https://infra.mail.ru:9696/v2.0")
 PROJECT_ID = os.getenv("VK_CLOUD_PROJECT_ID", "")
+FLOATING_NETWORK_ID = os.getenv("VK_CLOUD_FLOATING_NETWORK_ID", "ec8c610e-6387-447e-83d2-d2c541e88164")  # internet
 
 # Telegram Bot Configuration
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")  # Set your Chat ID here (send /start to bot and get ID from @userinfobot)
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # IP Ranges - Target subnets
 IP_RANGES = [
@@ -56,51 +55,16 @@ IP_RANGES = [
     (ipaddress.IPv4Address("95.163.248.0"), ipaddress.IPv4Address("95.163.251.255")),
 ]
 
-# VM Configuration - adjust these parameters according to your needs
-VM_CONFIG = {
-    "name": "auto-vm",
-    "flavorRef": "9cdbca68-5e15-4c54-979d-9952785ba33e",  # STD2-1-1: 1GB RAM, 1 CPU, 0GB disk
-    "imageRef": "",  # Not used with block_device_mapping_v2
-    "adminPass": "12345678a",
-    "config_drive": True,  # Enable config drive for network setup
-    "OS-DCF:diskConfig": "AUTO",  # Automatic disk configuration
-    "security_groups": [
-        {
-            "name": "default"
-        }
-    ],
-    "metadata": {
-        "backup_policy": "disabled"  # Disable auto backup
-    },
-    "networks": [
-        {
-            "uuid": "ec8c610e-6387-447e-83d2-d2c541e88164"  # internet (external network)
-        }
-    ],
-    "block_device_mapping_v2": [
-        {
-            "device_name": "/dev/vda",
-            "source_type": "image",
-            "destination_type": "volume",
-            "uuid": "769e4c02-680c-420e-874b-6fd41f2da6be",  # ubuntu-22-202508151311.gitfaa03fa8
-            "boot_index": 0,
-            "delete_on_termination": True,
-            "volume_size": 10  # 10GB disk
-        }
-    ]
-}
-
-
 # Parallel workers
-MAX_WORKERS = 13
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "13"))
 
 # Global variables for cleanup
-created_vms = []
+reserved_ips = []
 executor = None
 shutdown_event = threading.Event()
 
 # Statistics file
-STATS_FILE = Path(__file__).parent / "vm_statistics.json"
+STATS_FILE = Path(__file__).parent / "ip_statistics.json"
 stats_lock = threading.Lock()
 
 # Setup logging
@@ -145,16 +109,15 @@ def save_statistics(stats):
         logger.error(f"Failed to save statistics: {e}")
 
 
-def update_statistics(ips: list):
-    """Update statistics with new IPs"""
+def update_statistics(ip: str):
+    """Update statistics with new IP"""
     stats = load_statistics()
     stats["total_attempts"] += 1
     
-    for ip in ips:
-        if ip in stats["ip_addresses"]:
-            stats["ip_addresses"][ip] += 1
-        else:
-            stats["ip_addresses"][ip] = 1
+    if ip in stats["ip_addresses"]:
+        stats["ip_addresses"][ip] += 1
+    else:
+        stats["ip_addresses"][ip] = 1
     
     save_statistics(stats)
     
@@ -252,27 +215,27 @@ def check_and_notify_auth_error(exception):
     return False
 
 
-def cleanup_vms(client):
-    """Delete all created VMs"""
-    global created_vms
-    if not created_vms:
+def cleanup_floating_ips(client):
+    """Delete all reserved floating IPs"""
+    global reserved_ips
+    if not reserved_ips:
         return
     
-    logger.info("Cleaning up created VMs...")
-    send_telegram_message("🧹 <b>Очистка VM...</b>\n\nУдаляю созданные виртуальные машины...")
+    logger.info("Cleaning up reserved floating IPs...")
+    send_telegram_message("🧹 <b>Очистка IP...</b>\n\nОсвобождаю зарезервированные IP адреса...")
     
     deleted_count = 0
-    for vm_id in created_vms:
+    for ip_id in reserved_ips:
         try:
-            if client.delete_server(vm_id):
+            if client.delete_floating_ip(ip_id):
                 deleted_count += 1
-                logger.info(f"Deleted VM: {vm_id}")
+                logger.info(f"Released floating IP: {ip_id}")
         except Exception as e:
-            logger.error(f"Failed to delete VM {vm_id}: {e}")
+            logger.error(f"Failed to release floating IP {ip_id}: {e}")
     
-    msg = f"✅ <b>Очистка завершена</b>\n\nУдалено VM: {deleted_count} из {len(created_vms)}"
+    msg = f"✅ <b>Очистка завершена</b>\n\nОсвобождено IP: {deleted_count} из {len(reserved_ips)}"
     send_telegram_message(msg)
-    created_vms = []
+    reserved_ips = []
 
 
 def telegram_bot_listener():
@@ -329,189 +292,76 @@ def signal_handler(sig, frame):
 
 
 class VKCloudClient:
-    """Client for VK Cloud Nova API"""
+    """Client for VK Cloud Neutron API"""
     
-    def __init__(self, auth_token: str, endpoint: str):
+    def __init__(self, auth_token: str, endpoint: str, project_id: str):
         self.auth_token = auth_token
         self.endpoint = endpoint
+        self.project_id = project_id
         self.headers = {
             "X-Auth-Token": auth_token,
             "Content-Type": "application/json"
         }
     
-    def create_server(self, name: str, config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Create a new VM"""
-        url = f"{self.endpoint}/servers"
+    def create_floating_ip(self, network_id: str) -> Optional[Dict[str, Any]]:
+        """Reserve a floating IP"""
+        url = f"{self.endpoint}/floatingips"
         
-        server_config = {
-            "name": name,
-            "flavorRef": config["flavorRef"],
-            "adminPass": config["adminPass"],
-            "networks": config.get("networks", []),
-            "metadata": config.get("metadata", {})
+        payload = {
+            "floatingip": {
+                "floating_network_id": network_id
+            }
         }
         
-        # Add imageRef only if provided (not needed with block_device_mapping_v2)
-        if config.get("imageRef"):
-            server_config["imageRef"] = config["imageRef"]
-        
-        # Add block_device_mapping_v2 if provided
-        if config.get("block_device_mapping_v2"):
-            server_config["block_device_mapping_v2"] = config["block_device_mapping_v2"]
-        
-        payload = {"server": server_config}
-        
         try:
-            response = requests.post(url, headers=self.headers, json=payload)
+            response = requests.post(url, headers=self.headers, json=payload, timeout=30)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to create server: {e}")
-            if hasattr(e.response, 'text'):
+            logger.error(f"Failed to create floating IP: {e}")
+            if hasattr(e, 'response') and hasattr(e.response, 'text'):
                 logger.error(f"Response: {e.response.text}")
             check_and_notify_auth_error(e)
             return None
     
-    def get_server_details(self, server_id: str) -> Optional[Dict[str, Any]]:
-        """Get server details"""
-        url = f"{self.endpoint}/servers/{server_id}"
+    def get_floating_ip(self, ip_id: str) -> Optional[Dict[str, Any]]:
+        """Get floating IP details"""
+        url = f"{self.endpoint}/floatingips/{ip_id}"
         
         try:
-            response = requests.get(url, headers=self.headers)
+            response = requests.get(url, headers=self.headers, timeout=30)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to get server details for {server_id}: {e}")
+            logger.error(f"Failed to get floating IP details for {ip_id}: {e}")
             check_and_notify_auth_error(e)
             return None
     
-    def delete_server(self, server_id: str) -> bool:
-        """Delete a VM"""
-        url = f"{self.endpoint}/servers/{server_id}"
+    def delete_floating_ip(self, ip_id: str) -> bool:
+        """Release a floating IP"""
+        url = f"{self.endpoint}/floatingips/{ip_id}"
         
         try:
-            response = requests.delete(url, headers=self.headers)
+            response = requests.delete(url, headers=self.headers, timeout=30)
             response.raise_for_status()
             return True
         except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to delete server {server_id}: {e}")
+            logger.error(f"Failed to delete floating IP {ip_id}: {e}")
             check_and_notify_auth_error(e)
             return False
     
-    def wait_for_server_active(self, server_id: str, timeout: int = 300) -> bool:
-        """Wait for server to become ACTIVE"""
-        start_time = time.time()
-        
-        while time.time() - start_time < timeout:
-            # Check if shutdown requested
-            if shutdown_event.is_set():
-                logger.info(f"Shutdown requested while waiting for {server_id}")
-                return False
-            
-            details = self.get_server_details(server_id)
-            if not details:
-                return False
-            
-            status = details.get("server", {}).get("status")
-            logger.debug(f"Server {server_id} status: {status}")
-            
-            if status == "ACTIVE":
-                return True
-            elif status == "ERROR":
-                logger.error(f"Server {server_id} entered ERROR state")
-                return False
-            
-            # Human-like waiting: variable check intervals
-            check_interval = random.randint(2, 5)  # Sometimes check more/less frequently
-            if shutdown_event.wait(check_interval):
-                return False
-        
-        logger.error(f"Server {server_id} did not become ACTIVE within timeout")
-        return False
-    
-    def get_server_ips(self, server_id: str) -> list:
-        """Extract all IPs from server details"""
-        details = self.get_server_details(server_id)
-        if not details:
-            return []
-        
-        ips = []
-        addresses = details.get("server", {}).get("addresses", {})
-        
-        for network_name, network_addresses in addresses.items():
-            for addr_info in network_addresses:
-                ip = addr_info.get("addr")
-                if ip:
-                    ips.append(ip)
-        
-        return ips
-    
-    def configure_server_network(self, server_id: str) -> bool:
-        """Configure server network interface after creation"""
-        try:
-            # Get server details
-            details = self.get_server_details(server_id)
-            if not details:
-                return False
-            
-            # Check if server has IP addresses
-            addresses = details.get("server", {}).get("addresses", {})
-            if not addresses:
-                logger.warning(f"Server {server_id} has no IP addresses")
-                return False
-            
-            # Log network configuration
-            for network_name, network_ips in addresses.items():
-                for ip_info in network_ips:
-                    ip = ip_info.get("addr")
-                    if ip:
-                        logger.info(f"Server {server_id} configured with IP: {ip} on network: {network_name}")
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to configure network for server {server_id}: {e}")
-            return False
-    
-    def list_flavors(self) -> Optional[Dict[str, Any]]:
-        """List available flavors"""
-        url = f"{self.endpoint}/flavors/detail"
+    def list_networks(self) -> Optional[Dict[str, Any]]:
+        """List available networks"""
+        url = f"{self.endpoint}/networks"
         
         try:
-            response = requests.get(url, headers=self.headers)
+            response = requests.get(url, headers=self.headers, timeout=30)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to list flavors: {e}")
+            logger.error(f"Failed to list networks: {e}")
             check_and_notify_auth_error(e)
             return None
-
-
-def generate_random_vm_name() -> str:
-    """Generate random VM name with random pattern"""
-    pattern = random.choice([
-        # Pattern 1: word-word-chars
-        lambda: f"{''.join(random.choices(string.ascii_lowercase, k=random.randint(4, 7)))}-{''.join(random.choices(string.ascii_lowercase, k=random.randint(4, 6)))}-{''.join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(4, 8)))}",
-        # Pattern 2: word-word-word
-        lambda: f"{''.join(random.choices(string.ascii_lowercase, k=random.randint(3, 5)))}-{''.join(random.choices(string.ascii_lowercase, k=random.randint(3, 5)))}-{''.join(random.choices(string.ascii_lowercase, k=random.randint(3, 5)))}",
-        # Pattern 3: word-chars
-        lambda: f"{''.join(random.choices(string.ascii_lowercase, k=random.randint(5, 8)))}-{''.join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(6, 10)))}",
-        # Pattern 4: chars-word
-        lambda: f"{''.join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(5, 8)))}-{''.join(random.choices(string.ascii_lowercase, k=random.randint(4, 7)))}",
-        # Pattern 5: word-word
-        lambda: f"{''.join(random.choices(string.ascii_lowercase, k=random.randint(4, 7)))}-{''.join(random.choices(string.ascii_lowercase, k=random.randint(4, 7)))}",
-        # Pattern 6: word-digits
-        lambda: f"{''.join(random.choices(string.ascii_lowercase, k=random.randint(4, 7)))}-{''.join(random.choices(string.digits, k=random.randint(4, 8)))}",
-        # Pattern 7: digits-word
-        lambda: f"{''.join(random.choices(string.digits, k=random.randint(3, 6)))}-{''.join(random.choices(string.ascii_lowercase, k=random.randint(4, 7)))}",
-        # Pattern 8: single long word
-        lambda: ''.join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(8, 15))),
-        # Pattern 9: word-word-word-chars
-        lambda: f"{''.join(random.choices(string.ascii_lowercase, k=random.randint(3, 4)))}-{''.join(random.choices(string.ascii_lowercase, k=random.randint(3, 4)))}-{''.join(random.choices(string.ascii_lowercase, k=random.randint(3, 4)))}-{''.join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(4, 6)))}",
-        # Pattern 10: mixed alphanumeric without separators
-        lambda: ''.join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(10, 18))),
-    ])
-    return pattern()
 
 
 def human_like_delay(min_seconds: int, max_seconds: int, distribution: str = "normal") -> int:
@@ -601,10 +451,10 @@ def is_ip_in_range(ip_str: str) -> bool:
         return False
 
 
-def process_vm_creation(client: VKCloudClient, worker_id: int) -> Optional[Dict[str, Any]]:
+def process_ip_reservation(client: VKCloudClient, worker_id: int, network_id: str) -> Optional[Dict[str, Any]]:
     """
-    Create VMs until one with correct IP is found
-    Returns VM info if successful, None otherwise
+    Reserve floating IPs until one with correct range is found
+    Returns IP info if successful, None otherwise
     """
     attempt = 0
     
@@ -630,39 +480,28 @@ def process_vm_creation(client: VKCloudClient, worker_id: int) -> Optional[Dict[
             if human_like_wait(long_break):
                 return None
         
-        # Generate random VM name
-        vm_name = generate_random_vm_name()
-        
-        logger.info(f"[Worker {worker_id}] Creating VM: {vm_name} (attempt {attempt})")
+        logger.info(f"[Worker {worker_id}] Reserving floating IP (attempt {attempt})...")
         
         # Human-like delay with time-based adjustment
-        base_delay = human_like_delay(10, 30, "normal")  # 10-30 seconds base
+        base_delay = human_like_delay(3, 10, "normal")  # 3-10 seconds base (faster than VM creation)
         time_multiplier = get_time_based_delay_multiplier()
         delay = int(base_delay * time_multiplier)
         
         # Sometimes "think" before creating (like human double-checking)
-        if random.random() < 0.3:  # 30% chance
-            thinking_time = random.uniform(2, 5)
+        if random.random() < 0.2:  # 20% chance
+            thinking_time = random.uniform(1, 3)
             logger.info(f"[Worker {worker_id}] Thinking for {thinking_time:.1f} seconds...")
             if shutdown_event.wait(thinking_time):
                 return None
         
-        logger.info(f"[Worker {worker_id}] Waiting {delay} seconds before creating VM...")
+        logger.info(f"[Worker {worker_id}] Waiting {delay} seconds before reserving IP...")
         if human_like_wait(delay):
             return None
         
-        # Sometimes "change mind" before creating (5% chance)
-        if random.random() < 0.05:
-            logger.info(f"[Worker {worker_id}] Changed mind, skipping this VM...")
-            skip_delay = human_like_delay(5, 15, "normal")
-            if human_like_wait(skip_delay):
-                return None
-            continue
-        
-        # Create server
-        result = client.create_server(vm_name, VM_CONFIG)
+        # Reserve floating IP
+        result = client.create_floating_ip(network_id)
         if not result:
-            logger.error(f"[Worker {worker_id}] Failed to create VM, retrying...")
+            logger.error(f"[Worker {worker_id}] Failed to reserve IP, retrying...")
             # Human-like retry delay: longer when frustrated
             retry_delay = human_like_delay(5, 15, "exponential")
             logger.info(f"[Worker {worker_id}] Waiting {retry_delay} seconds before retry...")
@@ -670,85 +509,59 @@ def process_vm_creation(client: VKCloudClient, worker_id: int) -> Optional[Dict[
                 return None
             continue
         
-        server_id = result.get("server", {}).get("id")
-        if not server_id:
-            logger.error(f"[Worker {worker_id}] No server ID in response")
+        ip_id = result.get("floatingip", {}).get("id")
+        ip_address = result.get("floatingip", {}).get("floating_ip_address")
+        
+        if not ip_id or not ip_address:
+            logger.error(f"[Worker {worker_id}] No IP ID or address in response")
             continue
         
-        # Track created VM
-        global created_vms
-        created_vms.append(server_id)
+        # Track reserved IP
+        global reserved_ips
+        reserved_ips.append(ip_id)
         
-        logger.info(f"[Worker {worker_id}] VM created with ID: {server_id}, waiting for ACTIVE status...")
-        
-        # Wait for server to become active (with human-like patience)
-        # Sometimes check status more frequently, sometimes less
-        if not client.wait_for_server_active(server_id):
-            logger.warning(f"[Worker {worker_id}] VM {server_id} failed to become ACTIVE, deleting...")
-            if client.delete_server(server_id):
-                if server_id in created_vms:
-                    created_vms.remove(server_id)
-            # Human reaction: wait a bit after failure
-            failure_delay = human_like_delay(3, 10, "normal")
-            if human_like_wait(failure_delay):
-                return None
-            continue
-        
-        # Get IPs
-        ips = client.get_server_ips(server_id)
-        logger.info(f"[Worker {worker_id}] VM {server_id} is ACTIVE with IPs: {ips}")
-        
-        # Configure network interface
-        if not client.configure_server_network(server_id):
-            logger.warning(f"[Worker {worker_id}] Failed to configure network for VM {server_id}")
+        logger.info(f"[Worker {worker_id}] Reserved floating IP: {ip_address} (ID: {ip_id})")
         
         # Update statistics
-        if ips:
-            update_statistics(ips)
+        update_statistics(ip_address)
         
-        # Check if any IP is in range
-        matching_ips = [ip for ip in ips if is_ip_in_range(ip)]
-        
-        if matching_ips:
-            logger.info(f"[Worker {worker_id}] ✓ SUCCESS! Found VM with IP in range: {matching_ips}")
+        # Check if IP is in range
+        if is_ip_in_range(ip_address):
+            logger.info(f"[Worker {worker_id}] ✓ SUCCESS! Found IP in target range: {ip_address}")
             
             # Send Telegram notification
-            msg = f"🎉 <b>УСПЕХ! Найден VM с нужным IP</b>\n\n"
-            msg += f"<b>Name:</b> {vm_name}\n"
-            msg += f"<b>ID:</b> {server_id}\n"
-            msg += f"<b>IPs:</b> {', '.join(matching_ips)}\n"
-            msg += f"<b>All IPs:</b> {', '.join(ips)}"
+            msg = f"🎉 <b>УСПЕХ! Найден IP в нужном диапазоне</b>\n\n"
+            msg += f"<b>IP:</b> {ip_address}\n"
+            msg += f"<b>ID:</b> {ip_id}"
             send_telegram_message(msg)
             
             return {
-                "server_id": server_id,
-                "name": vm_name,
-                "ips": ips,
-                "matching_ips": matching_ips,
+                "ip_id": ip_id,
+                "ip_address": ip_address,
                 "worker_id": worker_id
             }
         else:
-            logger.info(f"[Worker {worker_id}] ✗ IP not in range, deleting VM {server_id}...")
-            if client.delete_server(server_id):
-                if server_id in created_vms:
-                    created_vms.remove(server_id)
+            logger.info(f"[Worker {worker_id}] ✗ IP not in range, releasing {ip_address}...")
+            if client.delete_floating_ip(ip_id):
+                if ip_id in reserved_ips:
+                    reserved_ips.remove(ip_id)
             
             # Human-like behavior: sometimes take longer to decide next action
-            logger.info(f"[Worker {worker_id}] VM deleted, considering next step...")
+            logger.info(f"[Worker {worker_id}] IP released, considering next step...")
             
             # Sometimes "review" what happened (10% chance)
             if random.random() < 0.1:
-                review_time = human_like_delay(3, 10, "normal")
+                review_time = human_like_delay(2, 5, "normal")
                 logger.info(f"[Worker {worker_id}] Reviewing results for {review_time} seconds...")
                 if human_like_wait(review_time):
                     return None
             
             # Wait after deletion with human-like delay
-            post_delete_delay = human_like_delay(5, 20, "normal")
+            post_delete_delay = human_like_delay(2, 8, "normal")  # Shorter than VM
             time_multiplier = get_time_based_delay_multiplier()
             post_delete_delay = int(post_delete_delay * time_multiplier)
             
-            logger.info(f"[Worker {worker_id}] Waiting {post_delete_delay} seconds before creating new VM...")
+            logger.info(f"[Worker {worker_id}] Waiting {post_delete_delay} seconds before reserving new IP...")
             if human_like_wait(post_delete_delay):
                 return None
 
@@ -761,7 +574,7 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     
     logger.info("=" * 80)
-    logger.info("VK Cloud VM Creator - IP Range Hunter")
+    logger.info("VK Cloud Floating IP Reserver - IP Range Hunter")
     logger.info("Target IP Ranges:")
     for i, (start, end) in enumerate(IP_RANGES, 1):
         logger.info(f"  Range {i}: {start} - {end}")
@@ -769,7 +582,7 @@ def main():
     logger.info("=" * 80)
     
     # Send start notification
-    msg = "🚀 <b>ЗАПУСК СКРИПТА</b>\n\n"
+    msg = "🚀 <b>ЗАПУСК СКРИПТА (IP RESERVATION)</b>\n\n"
     msg += f"<b>Воркеров:</b> {MAX_WORKERS}\n"
     msg += f"<b>IP диапазоны:</b>\n"
     for i, (start, end) in enumerate(IP_RANGES, 1):
@@ -783,29 +596,21 @@ def main():
         bot_thread.start()
         logger.info("Telegram bot listener started")
     
-    client = VKCloudClient(AUTH_TOKEN, NOVA_ENDPOINT)
+    client = VKCloudClient(AUTH_TOKEN, NEUTRON_ENDPOINT, PROJECT_ID)
     
     # Check configuration
     logger.info("Checking configuration...")
     
-    if not VM_CONFIG["flavorRef"]:
-        logger.info("FlavorRef not set, listing available flavors...")
-        flavors = client.list_flavors()
-        if flavors:
-            logger.info("Available flavors:")
-            for flavor in flavors.get("flavors", [])[:5]:
-                logger.info(f"  - {flavor.get('name')} (ID: {flavor.get('id')})")
-            logger.error("Please set VM_CONFIG['flavorRef'] in the script")
+    if not FLOATING_NETWORK_ID:
+        logger.info("Floating network ID not set, listing available networks...")
+        networks = client.list_networks()
+        if networks:
+            logger.info("Available networks:")
+            for network in networks.get("networks", [])[:5]:
+                if network.get("router:external"):
+                    logger.info(f"  - {network.get('name')} (ID: {network.get('id')}) [EXTERNAL]")
+            logger.error("Please set FLOATING_NETWORK_ID in .env or script")
             return
-    
-    # imageRef is not required when using block_device_mapping_v2
-    if not VM_CONFIG["imageRef"] and not VM_CONFIG.get("block_device_mapping_v2"):
-        logger.error("Please set VM_CONFIG['imageRef'] or VM_CONFIG['block_device_mapping_v2'] in the script")
-        return
-    
-    if not VM_CONFIG["networks"] or not VM_CONFIG["networks"][0].get("uuid"):
-        logger.error("Please set VM_CONFIG['networks'][0]['uuid'] in the script")
-        return
     
     # Start parallel processing
     logger.info(f"Starting {MAX_WORKERS} workers...")
@@ -813,7 +618,7 @@ def main():
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as exec:
         executor = exec
         futures = {
-            executor.submit(process_vm_creation, client, i): i 
+            executor.submit(process_ip_reservation, client, i, FLOATING_NETWORK_ID): i 
             for i in range(1, MAX_WORKERS + 1)
         }
         
@@ -825,11 +630,9 @@ def main():
                 result = future.result()
                 if result:
                     logger.info("=" * 80)
-                    logger.info("🎉 FOUND MATCHING VM!")
-                    logger.info(f"Server ID: {result['server_id']}")
-                    logger.info(f"Name: {result['name']}")
-                    logger.info(f"All IPs: {result['ips']}")
-                    logger.info(f"Matching IPs: {result['matching_ips']}")
+                    logger.info("🎉 FOUND MATCHING IP!")
+                    logger.info(f"IP Address: {result['ip_address']}")
+                    logger.info(f"IP ID: {result['ip_id']}")
                     logger.info("=" * 80)
                     
                     # Set shutdown to stop other workers
@@ -846,4 +649,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

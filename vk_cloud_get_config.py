@@ -131,6 +131,9 @@ def get_networks():
         data = response.json()
         
         networks = data.get("networks", [])
+        external_networks = []
+        internal_networks = []
+        
         for net in networks:
             name = net.get('name', 'unnamed')
             net_id = net.get('id')
@@ -141,13 +144,21 @@ def get_networks():
             print(f"  ID: {net_id}")
             print(f"  Status: {status}")
             print(f"  External: {is_external}")
+            
+            if is_external:
+                external_networks.append(net)
+            else:
+                internal_networks.append(net)
         
-        # Find internal network
-        internal_nets = [net for net in networks if not net.get('router:external', False)]
-        if internal_nets:
-            print(f"\n✓ Found {len(internal_nets)} internal networks")
-            print(f"Recommended: {internal_nets[0].get('name')} (ID: {internal_nets[0].get('id')})")
-            return internal_nets[0].get('id')
+        # For floating IPs, we need external networks
+        if external_networks:
+            print(f"\n✓ Found {len(external_networks)} external networks (for floating IPs)")
+            print(f"Recommended for floating IPs: {external_networks[0].get('name')} (ID: {external_networks[0].get('id')})")
+            return external_networks[0].get('id')
+        elif internal_networks:
+            print(f"\n✓ Found {len(internal_networks)} internal networks")
+            print(f"Note: For floating IPs, you need an external network")
+            return internal_networks[0].get('id')
     except Exception as e:
         print(f"✗ Error getting networks: {e}")
     
@@ -160,28 +171,43 @@ def main():
     print("VK Cloud Configuration Helper")
     print("=" * 80)
     
-    flavor_id = get_flavors()
-    image_id = get_images()
+    # For floating IP reservation, we only need networks
     network_id = get_networks()
     
     print("\n" + "=" * 80)
-    print("CONFIGURATION SUMMARY")
+    print("CONFIGURATION SUMMARY FOR FLOATING IP RESERVATION")
     print("=" * 80)
     
-    config = {
-        "flavorRef": flavor_id or "PLEASE_SET_FLAVOR_ID",
-        "imageRef": image_id or "PLEASE_SET_IMAGE_ID",
-        "networks": [{"uuid": network_id or "PLEASE_SET_NETWORK_ID"}]
-    }
+    print("\nAdd this to your .env file:")
+    print(f'VK_CLOUD_FLOATING_NETWORK_ID={network_id or "PLEASE_SET_NETWORK_ID"}')
     
-    print("\nCopy this configuration to vk_cloud_vm_creator.py:")
-    print("\nVM_CONFIG = {")
-    print(f'    "name": "auto-vm",')
-    print(f'    "flavorRef": "{config["flavorRef"]}",')
-    print(f'    "imageRef": "{config["imageRef"]}",')
-    print(f'    "adminPass": "TempPassword123!",')
-    print(f'    "networks": [{{"uuid": "{config["networks"][0]["uuid"]}"}}]')
-    print("}")
+    print("\n" + "=" * 80)
+    print("NOTE: For VM creation (old method), run with --vm flag")
+    print("=" * 80)
+    
+    # Optionally show VM config if needed
+    if len(sys.argv) > 1 and sys.argv[1] == '--vm':
+        print("\n" + "=" * 80)
+        print("VM CONFIGURATION (LEGACY)")
+        print("=" * 80)
+        
+        flavor_id = get_flavors()
+        image_id = get_images()
+        
+        config = {
+            "flavorRef": flavor_id or "PLEASE_SET_FLAVOR_ID",
+            "imageRef": image_id or "PLEASE_SET_IMAGE_ID",
+            "networks": [{"uuid": network_id or "PLEASE_SET_NETWORK_ID"}]
+        }
+        
+        print("\nCopy this configuration to vk_cloud_vm_creator.py:")
+        print("\nVM_CONFIG = {")
+        print(f'    "name": "auto-vm",')
+        print(f'    "flavorRef": "{config["flavorRef"]}",')
+        print(f'    "imageRef": "{config["imageRef"]}",')
+        print(f'    "adminPass": "TempPassword123!",')
+        print(f'    "networks": [{{"uuid": "{config["networks"][0]["uuid"]}"}}]')
+        print("}")
     
     print("\n" + "=" * 80)
 

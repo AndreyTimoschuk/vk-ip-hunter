@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Quick run script for VK Cloud VM Creator
+# Quick run script for VK Cloud Floating IP Reserver
 # Load environment variables from .env file if exists
 
 if [ -f .env ]; then
@@ -19,5 +19,5 @@ if [ -z "$VK_CLOUD_AUTH_TOKEN" ]; then
 fi
 
 # Run the script
-python3 vk_cloud_vm_creator.py
+python3 vk_cloud_ip_reserver.py
 

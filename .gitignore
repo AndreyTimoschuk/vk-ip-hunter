@@ -44,5 +44,6 @@ Thumbs.db
 
 # Statistics and logs
 vm_statistics.json
+ip_statistics.json
 *.log
 
